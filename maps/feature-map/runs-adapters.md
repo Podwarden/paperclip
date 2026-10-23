@@ -49,8 +49,12 @@ Preconditions: follow the [baseline](./README.md#before-driving-a-journey). Reco
 ### `session`
 
 For `runs-adapters/session`, complete a task in a disposable warm sandbox and
-retain its saved workspace file. Use a board-authorized session reset, then
-remove only that fixture's inactive provider sandbox. Send a follow-up that
+retain its saved workspace file. Let the warm session close normally and verify
+that the retained lease has a complete, lease-bound harness backup before
+injecting sandbox loss. Removing a still-warm sandbox before that checkpoint
+exercises the separate acquisition safety gate, which must remain blocked.
+Use a board-authorized session reset, then remove only that fixture's inactive
+provider sandbox. Send a follow-up that
 reads the retained file and appends one new line. Verify a replacement sandbox,
 a new provider session, the exact file contents, successful finalization and no
 stranded task lock. Send another follow-up and verify ordinary session reuse.
