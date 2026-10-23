@@ -12402,14 +12402,14 @@ async function createRunnerdBackendWithinSessionClaim(
     };
   };
 
-  const claimUntouchedSessionInResumedLease = async (): Promise<boolean> => {
+  const claimUntouchedRemoteSession = async (): Promise<boolean> => {
     if (!remoteCommandRunner || !remoteRuntimeRoot || !remoteSessionRoot) return false;
     const identity = readRunnerdDurableIdentity(root);
     if (!durableIdentityMatchesExecution(identity, input.execution) ||
         identity?.runnerInstanceId !== effectiveRunnerInstanceId ||
         identity?.environmentLeaseId !== effectiveEnvironmentLeaseId ||
         !runnerdStateProvesIncompleteBootstrap(root)) return false;
-    // A reusable workspace may have failed before any harness was created.
+    // Workspace reuse or replacement can acquire a lease for a new session.
     // Claim this exact new session atomically under readable real directories.
     // Missing files inside an existing session never authorize a fresh start.
     const probe = await remoteCommandRunner.execute({
@@ -12645,7 +12645,7 @@ async function createRunnerdBackendWithinSessionClaim(
                       !state.providerSessionIdentity
                     ) {
                       if (state.incompleteReason !== "unavailable" || backupAvailable ||
-                          !(await claimUntouchedSessionInResumedLease())) {
+                          !(await claimUntouchedRemoteSession())) {
                         throw new Error(`runner_harness_state_mismatch: resumed_${state.incompleteReason}`);
                       }
                     } else {
@@ -12660,7 +12660,14 @@ async function createRunnerdBackendWithinSessionClaim(
                     await measureNativeRunnerSpan(
                       input.trace,
                       "sandbox.lease.replacement",
-                      restoreVerifiedHarnessBackup,
+                      async () => {
+                        // A replaced workspace does not imply this provider
+                        // session ever ran. Keep restore mandatory unless its
+                        // durable bootstrap and an atomic remote claim prove
+                        // there is no prior session state to preserve.
+                        if (!backupAvailable && await claimUntouchedRemoteSession()) return;
+                        await restoreVerifiedHarnessBackup();
+                      },
                       {
                         attributes: {
                           provider: remoteTarget.providerKey ?? "sandbox",
