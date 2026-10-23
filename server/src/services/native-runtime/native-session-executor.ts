@@ -12595,6 +12595,15 @@ async function createRunnerdBackendWithinSessionClaim(
                     (candidate) =>
                       existsSync(resolve(candidate, "manifest.json")),
                   );
+                  // Workspace replacement is independent of provider-session
+                  // continuity. Decide the source before recording acquisition.
+                  const freshReplacement =
+                    sandboxLeaseAcquisition?.outcome === "replacement" &&
+                    !backupAvailable && await measureNativeRunnerSpan(
+                      input.trace,
+                      "harness_state.bootstrap_claim",
+                      claimUntouchedRemoteSession,
+                    );
                   const restoreIntoCreatedSandbox =
                     shouldRestoreNativeHarnessBackupIntoSandbox({
                       acquisitionOutcome:
@@ -12614,12 +12623,14 @@ async function createRunnerdBackendWithinSessionClaim(
                         input.execution.session.lifecyclePolicy.mode,
                       outcome: sandboxLeaseAcquisition?.outcome ?? "unknown",
                       stateSource:
-                        sandboxLeaseAcquisition?.outcome === "replacement" ||
-                        restoreIntoCreatedSandbox
-                          ? "verified_failover_backup"
-                          : sandboxLeaseAcquisition?.outcome === "resumed"
-                            ? "sandbox_filesystem"
-                            : "new_sandbox",
+                        freshReplacement
+                          ? "new_sandbox"
+                          : sandboxLeaseAcquisition?.outcome === "replacement" ||
+                              restoreIntoCreatedSandbox
+                            ? "verified_failover_backup"
+                            : sandboxLeaseAcquisition?.outcome === "resumed"
+                              ? "sandbox_filesystem"
+                              : "new_sandbox",
                       bytesTransferred: 0,
                     },
                   });
@@ -12661,12 +12672,7 @@ async function createRunnerdBackendWithinSessionClaim(
                       input.trace,
                       "sandbox.lease.replacement",
                       async () => {
-                        // A replaced workspace does not imply this provider
-                        // session ever ran. Keep restore mandatory unless its
-                        // durable bootstrap and an atomic remote claim prove
-                        // there is no prior session state to preserve.
-                        if (!backupAvailable && await claimUntouchedRemoteSession()) return;
-                        await restoreVerifiedHarnessBackup();
+                        if (!freshReplacement) await restoreVerifiedHarnessBackup();
                       },
                       {
                         attributes: {

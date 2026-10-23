@@ -79,7 +79,7 @@ import {
 import { nativeRuntimeContextFixture } from "./runtime-context.test-fixture.js";
 import { nativeToolContractFingerprintForTarget } from "./native-session-resume.js";
 import * as nativeSessionResume from "./native-session-resume.js";
-import { buildNativeHeartbeatPreparationSpans } from "./native-run-trace.js";
+import { buildNativeHeartbeatPreparationSpans, createNativeRunTrace } from "./native-run-trace.js";
 import { NativeRunnerOwnershipUnverifiedError } from "./native-runner-ownership.js";
 import type { AdapterRuntimeEvent } from "../../adapters/index.js";
 import type { AdapterUsageCheckpoint } from "@paperclipai/adapter-utils";
@@ -13261,8 +13261,10 @@ describe("runnerd provider runtime wiring", () => {
     });
     const runtimeContext = nativeRuntimeContextFixture();
     const executionWithContext = { ...execution, runtimeContext };
+    const onTraceEvent = vi.fn(async (_event: AdapterRuntimeEvent) => undefined);
     const backend = await createRunnerdBackend({
       db: leaseDb(execution), execution: executionWithContext, runnerInstanceId: "runner-new-in-retained-workspace",
+      trace: createNativeRunTrace({ runId: execution.binding.runId, onEvent: onTraceEvent }),
       runnerIngressAuthorized: true,
       runnerExecutionTarget: {
         kind: "remote", transport: "sandbox", remoteCwd, environmentId: "environment",
@@ -13299,6 +13301,12 @@ describe("runnerd provider runtime wiring", () => {
     }
     if (scenario === "fresh") {
       await expect(options.prepareExternalRunnerState()).resolves.toBeUndefined();
+      expect(onTraceEvent).toHaveBeenCalledWith(expect.objectContaining({
+        payload: expect.objectContaining({
+          span: "sandbox.lease.acquisition",
+          stateSource: outcome === "replacement" ? "new_sandbox" : "sandbox_filesystem",
+        }),
+      }));
       expect(remoteExecute.mock.calls.some(([command]) => command.args?.[1]?.includes("install -d"))).toBe(false);
       expect(syncIn).not.toHaveBeenCalled();
       const claimCommand = remoteExecute.mock.calls.find(([command]) => command.args?.[2] === "paperclip-runner-claim-unstarted-session")![0];
