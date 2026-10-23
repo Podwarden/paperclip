@@ -385,11 +385,8 @@ export async function githubGuestBotConnectionForSession(
   >,
 ): Promise<string | null> {
   if (!session.runId || !session.agentId || !session.issueId) return null;
-  const guestSources = await db
-    .select({
-      commentId: chatMessageLinks.commentId,
-      connectionId: chatEndpoints.connectionId,
-    })
+  const guestSource = (commentId?: string) => db
+    .select({ connectionId: chatEndpoints.connectionId })
     .from(chatMessageLinks)
     .innerJoin(
       chatDeliveries,
@@ -406,13 +403,15 @@ export async function githubGuestBotConnectionForSession(
     .where(
       and(
         eq(chatMessageLinks.companyId, session.companyId),
-        eq(chatConversations.issueId, session.issueId),
-        eq(chatEndpoints.assignedAgentId, session.agentId),
+        ...(commentId ? [eq(chatMessageLinks.commentId, commentId)] : []),
+        eq(chatConversations.issueId, session.issueId!),
+        eq(chatEndpoints.assignedAgentId, session.agentId!),
         eq(chatEndpoints.provider, "github"),
         sql`${chatDeliveries.normalizedEvent} -> 'githubAuthority' ->> 'guest' = 'true'`,
       ),
-    );
-  if (!guestSources.length) return null;
+    )
+    .limit(1);
+  if (!(await guestSource()).length) return null;
   const [run] = await db
     .select({
       id: heartbeatRuns.id,
@@ -434,5 +433,6 @@ export async function githubGuestBotConnectionForSession(
     );
   const commentId = run ? await chatRunSourceMessageId(db, run, { allowLegacyWakeComment: true, provider: "github" }) : null;
   if (typeof commentId !== "string") return null;
-  return guestSources.find((source) => source.commentId === commentId)?.connectionId ?? null;
+  const [source] = await guestSource(commentId);
+  return source?.connectionId ?? null;
 }
