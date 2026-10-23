@@ -296,3 +296,15 @@ calls. Database/provider-fixture evidence lives in
 It does not establish authenticated provider deployment, OAuth consent or remote
 revocation. See [Supabase](../../doc/connections/SUPABASE.md) and
 [Vercel](../../doc/connections/vercel.md) for the remaining live-proof matrix.
+
+Native delivery (2026-10-23): reviewed REST connections are admitted in connection
+readiness, native runtime snapshots, and runtime gateway preparation. The real
+Codex walkthrough initially failed at all three despite a successful board test;
+the database-backed lifecycle regression now covers ready search/request,
+existing-card completion, assigned-tool search/call, and inactive/unrecognized
+connection denial for both providers. After repair, a real Codex agent deployed
+and configured both services. Supabase's Dashboard invocation returned the marker,
+and Vercel's signed-in browser served the preview. The Vercel first-deployment
+production exception remains recorded as a separate failed outcome; default
+preview now requires an existing deployment and reports target mismatches for
+reconciliation. See the provider documents for the external-deletion race limit.

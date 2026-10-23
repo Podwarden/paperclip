@@ -161,14 +161,37 @@ export function vercelClient(headers: Record<string, string>, request: VercelReq
       case "vercel_get_deployment": result = pick(await getDeployment(projectId, deploymentId), deploymentFields); break;
       case "vercel_create_deployment": {
         if (deploymentId) await getDeployment(projectId, deploymentId);
+        const preview = args.target !== "production";
+        if (preview) {
+          // Vercel promotes the first deployment of an empty project to
+          // production, including its environment variables. Failed/canceled
+          // deployments count as history; deleted deployments do not.
+          const existing = collection(record(await send("/v7/deployments", "GET", undefined, { projectId, limit: 1 })), "deployments");
+          if (!existing.length) throw failure(409, "vercel_preview_requires_existing_deployment", "Vercel makes the first deployment of an empty project production. Use a project with an existing deployment for preview, or set target=production only when production deployment is authorized.");
+          for (const item of existing) {
+            const value = record(item), id = value.uid ?? value.id;
+            if (typeof id !== "string" || !/^dpl_[A-Za-z0-9]{1,200}$/.test(id)) throw failure(502, "vercel_invalid_response", "Vercel did not confirm an existing deployment. No deployment was submitted.");
+            if (value.projectId !== projectId) throw failure(403, "vercel_project_mismatch", "Vercel returned a deployment outside the selected project.");
+          }
+        }
         const files = (args.files as unknown[] | undefined)?.map(value => { const file = record(value); return { file: file.file, data: file.content, encoding: file.encoding ?? "utf-8" }; });
         const created = record(await send("/v13/deployments", "POST", { name: args.name, project: projectId,
           ...(args.target === "production" ? { target: "production" } : {}),
           ...(files ? { files } : {}), ...(args.gitSource ? { gitSource: args.gitSource } : {}), ...(deploymentId ? { deploymentId } : {}),
           projectSettings: args.projectSettings ?? pick(project, ["framework", "buildCommand", "installCommand", "devCommand", "outputDirectory", "rootDirectory", "nodeVersion"]),
         }));
-        if (typeof created.id !== "string" || !/^dpl_[A-Za-z0-9]+$/.test(created.id) || typeof created.readyState !== "string") throw failure(502, "vercel_invalid_response", "Vercel did not confirm the deployment. Inspect its state before retrying.");
+        if (typeof created.id !== "string" || !/^dpl_[A-Za-z0-9]{1,200}$/.test(created.id) || typeof created.readyState !== "string") throw failure(502, "vercel_invalid_response", "Vercel did not confirm the deployment. Inspect its state before retrying.");
         if (created.projectId !== undefined && created.projectId !== projectId) throw failure(403, "vercel_project_mismatch", "Vercel returned a deployment outside the selected project.");
+        if (preview && created.target !== null) {
+          // The preflight cannot prevent concurrent external deletion of all
+          // deployments. Persist the created identity for reconciliation and
+          // idempotent replay instead of losing it in a post-write exception.
+          result = { id: created.id, projectId, requestedTarget: "preview",
+            target: created.target === "production" ? "production" : "unknown", reconciliationRequired: true,
+            code: "vercel_deployment_target_mismatch",
+            message: "Vercel created a deployment without confirming the requested preview environment. Inspect this deployment before any retry; it may use Production environment variables and domains." };
+          break;
+        }
         result = pick(created, deploymentFields); break;
       }
       case "vercel_cancel_deployment": await getDeployment(projectId, deploymentId); result = pick(await send(`/v12/deployments/${encodeURIComponent(deploymentId)}/cancel`, "PATCH", {}), deploymentFields); break;

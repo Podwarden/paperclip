@@ -1,14 +1,18 @@
 import { createHash, randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, onTestFinished, vi } from "vitest";
 import {
   activityLog, agents, applyPendingMigrations, companies, companyMemberships, companySecrets,
-  connectionGrants, createDb, ensurePostgresDatabase, heartbeatRuns, issues,
+  connectionGrants, createDb, ensurePostgresDatabase, heartbeatRuns, issues, issueThreadInteractions,
   toolAccessAuditEvents, toolActionRequests, toolApplications, toolCatalogEntries, toolConnections, toolInvocations, userSecretDeclarations,
 } from "@paperclipai/db";
 import { toolAccessService } from "../services/tool-access.js";
 import { createToolGatewayService } from "../services/tool-gateway.js";
 import { summarizeToolValue } from "../services/tool-content-guards.js";
+import { connectionIntentService } from "../services/connection-intents.js";
+import { resolveNativeRuntimeMcpSnapshot } from "../services/native-runtime/runtime-context.js";
+import { buildPaperclipRuntimeMcpServers } from "../services/heartbeat/run-preparation.js";
+import { createAssignedMcpTools } from "../services/native-runtime/assigned-mcp-tools.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 
 // These provider fixtures exercise Paperclip's real setup, vault, policy, and
@@ -132,9 +136,14 @@ const support = external ? { supported: true } : await getEmbeddedPostgresTestSu
         expect(parsed.searchParams.get("teamId")).toBe(teamId);
         if (parsed.pathname === "/v10/projects" && method === "GET") return Response.json({ projects: [{ id: projectId, name: "fixture-app", accountId: teamId }], pagination: { count: 1, next: null } });
         if (parsed.pathname === `/v9/projects/${projectId}` && method === "GET") return Response.json({ id: projectId, name: "fixture-app", accountId: teamId });
+        if (parsed.pathname === "/v7/deployments" && method === "GET") {
+          expect(parsed.searchParams.get("projectId")).toBe(projectId);
+          expect(parsed.searchParams.get("limit")).toBe("1");
+          return Response.json({ deployments: [{ uid: "dpl_existing123", projectId, readyState: "ERROR" }] });
+        }
         if (parsed.pathname === "/v13/deployments" && method === "POST") {
           expect(JSON.parse(String(init.body))).toMatchObject({ project: projectId, files: [{ file: "index.html", data: "<h1>Hello</h1>", encoding: "utf-8" }] });
-          return Response.json({ id: deploymentId, projectId, name: "fixture-app", url: "fixture-app.vercel.app", readyState: "BUILDING" });
+          return Response.json({ id: deploymentId, projectId, name: "fixture-app", url: "fixture-app.vercel.app", readyState: "BUILDING", target: null });
         }
         if (parsed.pathname === `/v10/projects/${projectId}/env` && method === "POST") {
           expect(parsed.searchParams.get("upsert")).toBe("true");
@@ -172,6 +181,73 @@ const support = external ? { supported: true } : await getEmbeddedPostgresTestSu
   }
 
   describe.each(providers)("$slug", provider => {
+    it("recognizes reviewed REST readiness and completes an existing connection card", async () => {
+      const f = await fixture(provider, true);
+      await f.service.putConnectionInstalls(f.connected.connectionId, {
+        installs: [{ targetType: "agent", targetId: f.agent.id }],
+      }, actor);
+      const intents = connectionIntentService(db);
+      const claims = { sub: f.agent.id, company_id: f.company.id, run_id: f.run.id, responsible_user_id: actor.actorId };
+      f.request.mockClear();
+      const found = await intents.search(claims, provider.slug);
+      expect(found.results).toContainEqual(expect.objectContaining({
+        service: provider.slug, state: "ready", connectionId: f.connected.connectionId,
+      }));
+      expect(await intents.request(claims, provider.slug)).toMatchObject({
+        state: "ready", connectionId: f.connected.connectionId, interactionId: null,
+      });
+      const [card] = await db.insert(issueThreadInteractions).values({
+        companyId: f.company.id, issueId: f.issue.id, sourceRunId: f.run.id,
+        kind: "connection_intent", status: "pending", addresseeUserId: actor.actorId,
+        requestedResolverPolicy: "human_only", effectiveResolverPolicy: "human_only",
+        payload: { version: 1, serviceSlug: provider.slug, serviceName: provider.slug,
+          requestingAgentId: f.agent.id, requestingAgentName: f.agent.name, phase: "requested" },
+      }).returning();
+      expect(await intents.complete(card.id, f.connected.connectionId, actor.actorId)).toMatchObject({
+        status: "accepted", result: { outcome: "connected", connectionId: f.connected.connectionId },
+      });
+      expect(await intents.usableConnectionForAgent({ companyId: f.company.id, agentId: f.agent.id,
+        responsibleUserId: "another-user", serviceSlug: provider.slug })).toBeNull();
+      expect(f.request).not.toHaveBeenCalled();
+    });
+
+    it("delivers reviewed REST actions through native assignments without admitting unsupported or inactive connections", async () => {
+      vi.stubEnv("PAPERCLIP_API_URL", "http://127.0.0.1:3100");
+      onTestFinished(() => vi.unstubAllEnvs());
+      const f = await fixture(provider, true);
+      await f.service.putConnectionInstalls(f.connected.connectionId, {
+        installs: [{ targetType: "agent", targetId: f.agent.id }],
+      }, actor);
+      const snapshot = await resolveNativeRuntimeMcpSnapshot({ db, agent: f.agent, runId: f.run.id });
+      expect(snapshot.bindingId).not.toBeNull();
+      const servers = await buildPaperclipRuntimeMcpServers({ db, agent: f.agent, runId: f.run.id,
+        expectedAssignmentDigest: snapshot.digest });
+      expect(servers).toHaveLength(1);
+      const assigned = await createAssignedMcpTools({ gateway: f.gateway,
+        gatewayPublicId: new URL(servers[0].url).pathname.split("/").at(-1)!, bearerToken: servers[0].token! });
+      const found = await assigned.execute({ tool: "paperclip_search_assigned_tools", arguments: { query: provider.read.name } }) as { tools: Array<{ name: string }> };
+      expect(found.tools).toHaveLength(1);
+      expect(JSON.stringify(await assigned.execute({ tool: "paperclip_call_assigned_tool",
+        arguments: { name: found.tools[0].name, arguments: provider.read.parameters } }))).toContain(provider.read.receipt);
+
+      const intents = connectionIntentService(db);
+      const original = f.connected.connection;
+      f.request.mockClear();
+      for (const change of [
+        { enabled: false },
+        { status: "archived" as const },
+        { config: { ...original.config, url: "https://unsupported.example" } },
+      ]) {
+        await db.update(toolConnections).set({ status: "active", enabled: true, config: original.config, ...change })
+          .where(eq(toolConnections.id, original.id));
+        expect(await intents.usableConnectionForAgent({ companyId: f.company.id, agentId: f.agent.id,
+          responsibleUserId: actor.actorId, serviceSlug: provider.slug })).toBeNull();
+        expect((await resolveNativeRuntimeMcpSnapshot({ db, agent: f.agent, runId: f.run.id })).bindingId).toBeNull();
+        expect(await buildPaperclipRuntimeMcpServers({ db, agent: f.agent, runId: f.run.id })).toEqual([]);
+      }
+      expect(f.request).not.toHaveBeenCalled();
+    });
+
     it("rejects unknown setup settings before saving credentials or contacting the provider", async () => {
       const company = await createCompany();
       const request = vi.fn(async () => { throw new Error("Unexpected provider request"); });

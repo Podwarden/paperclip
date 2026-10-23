@@ -115,8 +115,22 @@ variables and build settings, then call `create_deployment` with exactly one of:
 - `gitSource: {type: "github", repoId, ref}` for larger repositories.
 - `deploymentId` to redeploy an existing deployment in that same project.
 
-Preview is the default target; `target: "production"` must be explicit. The
-adapter submits one deployment request and returns its ID, URL and state. A
+Preview is the default target; `target: "production"` must be explicit. Vercel
+[makes a project's first deployment production](https://vercel.com/docs/deployments/environments#first-deployment),
+even when preview is requested. Before a preview, Paperclip checks that the
+project has at least one existing deployment. Failed and canceled deployments
+count. An empty project is rejected before submission with
+`vercel_preview_requires_existing_deployment`; initialize it with an explicitly
+authorized production deployment before requesting preview.
+
+The check cannot prevent an external actor from deleting every deployment
+between inspection and submission. If a preview response has a production or
+unrecognized target, the adapter preserves its deployment ID in a
+`reconciliationRequired` receipt with `vercel_deployment_target_mismatch`.
+Inspect that deployment before any retry. Paperclip does not automatically retry,
+delete the result, or change deployment protection.
+
+The adapter submits one deployment request and returns its ID, URL and state. A
 `QUEUED` or `BUILDING` response is not success evidence: inspect with
 `get_deployment` until a terminal state is observed. Provider mutations are never
 retried automatically after a timeout or ambiguous transport failure.
@@ -164,6 +178,22 @@ path for this account. Production publishing, GitHub-source deployment, custom
 domains, forced credential refresh, and all provider plan combinations were not
 live-tested. Their fixture coverage does not establish account entitlement.
 Keep receipts free of credentials, environment values, and raw provider errors.
+
+A browser-only retest on 2026-10-23 used a real native Codex agent. Initial
+connection discovery and task-card reuse failed despite correct saved access.
+Readiness, native assignment, and runtime preparation now admit reviewed REST
+connections through the existing registry and governance checks. Four new
+database-backed cases reproduced the failure; all 33 lifecycle cases passed
+after the fix. The real agent then created a disposable project, set an encrypted
+preview environment marker, and read its metadata and deployment settings back.
+The signed-in browser loaded the READY preview and displayed the expected marker.
+
+The first deployment in that run became production despite its preview request.
+The agent retained that result for review and made one subsequent preview, which
+was independently loaded in the browser. This observed failure prompted the
+first-deployment guard above. Keep the failed run and corrective preview separate;
+successful gateway fixtures alone did not reveal the provider's first-deployment
+exception or prove native Codex tool delivery.
 
 Sensitive tool arguments such as `secretValue` are encrypted in newly created
 approval payloads with the instance tool-action signing secret. Approval summaries

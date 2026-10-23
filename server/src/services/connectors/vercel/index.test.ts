@@ -8,7 +8,9 @@ const token = "fixture-vercel-private-token";
 const headers = { Authorization: `Bearer ${token}` };
 const teamId = "team_fixture123";
 const project = { id: "prj_fixture123", name: "fixture", accountId: teamId, framework: null, nodeVersion: "22.x" };
-const deployment = { id: "dpl_fixture123", projectId: project.id, url: "fixture.vercel.app", readyState: "READY" };
+const deployment = { id: "dpl_fixture123", projectId: project.id, url: "fixture.vercel.app", readyState: "READY", target: null };
+const deploymentArgs = { projectId: project.id, name: "fixture", files: [{ file: "index.html", content: "<h1>Preview</h1>" }] };
+const previousDeployment = { uid: "dpl_previous123", projectId: project.id, state: "READY" };
 const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json" } });
 function fixture(respond: (url: URL, init: RequestInit) => Response | Promise<Response> = () => json({})) {
   const request = vi.fn<VercelRequest>(async (url, init) => {
@@ -18,6 +20,13 @@ function fixture(respond: (url: URL, init: RequestInit) => Response | Promise<Re
     return respond(parsed, init);
   });
   return { request, client: vercelClient(headers, request, teamId) };
+}
+function previewFixture(existing: unknown, created: unknown = deployment) {
+  return fixture((url, init) => {
+    if (url.pathname === "/v7/deployments" && init.method === "GET") return json(existing);
+    if (url.pathname === "/v13/deployments" && init.method === "POST") return json(created);
+    throw new Error(`Unexpected fixture request: ${init.method} ${url.pathname}`);
+  });
 }
 
 describe("Vercel deployment connector", () => {
@@ -85,19 +94,87 @@ describe("Vercel deployment connector", () => {
     expect(request.mock.calls[0]![1].method).toBe("GET");
   });
 
-  it("deploys inline files to the verified project with preview defaults and first-deployment settings", async () => {
-    const { request, client } = fixture(() => json({ ...deployment, env: ["hidden"], token }));
-    expect(await client.invoke("vercel_create_deployment", { projectId: project.id, name: "fixture", files: [{ file: "index.html", content: "<h1>Preview</h1>" }] })).toEqual(deployment);
-    const [url, init] = request.mock.calls[1]!;
+  it.each([undefined, "preview"])("deploys inline files with target %s after verifying a previous deployment exists", async (target) => {
+    const { request, client } = previewFixture({ deployments: [previousDeployment] }, { ...deployment, env: ["hidden"], token });
+    expect(await client.invoke("vercel_create_deployment", { ...deploymentArgs, target })).toEqual(deployment);
+    expect(request.mock.calls.map(([url, init]) => [new URL(url).pathname, init.method])).toEqual([
+      [`/v9/projects/${project.id}`, "GET"], ["/v7/deployments", "GET"], ["/v13/deployments", "POST"],
+    ]);
+    expect(Object.fromEntries(new URL(request.mock.calls[1]![0]).searchParams)).toEqual({ projectId: project.id, limit: "1", teamId });
+    const [url, init] = request.mock.calls[2]!;
     expect(url).toBe(`${VERCEL_API_URL}/v13/deployments?teamId=${teamId}`);
     expect(JSON.parse(String(init.body))).toEqual({ name: "fixture", project: project.id, files: [{ file: "index.html", data: "<h1>Preview</h1>", encoding: "utf-8" }], projectSettings: { framework: null, nodeVersion: "22.x" } });
   });
 
   it("deploys GitHub sources and sends an explicit production target", async () => {
-    const { request, client } = fixture(() => json(deployment));
+    const { request, client } = fixture(() => json({ ...deployment, target: "production" }));
     const gitSource = { type: "github", repoId: "123", ref: "main" };
     await client.invoke("vercel_create_deployment", { projectId: project.id, name: "fixture", gitSource, target: "production" });
     expect(JSON.parse(String(request.mock.calls[1]![1].body))).toMatchObject({ gitSource, target: "production", project: project.id });
+    expect(request).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([undefined, "preview"])("rejects target %s for an empty project before a deployment can be promoted", async (target) => {
+    const { request, client } = previewFixture({ deployments: [] });
+    await expect(client.invoke("vercel_create_deployment", { ...deploymentArgs, target })).rejects.toMatchObject({
+      status: 409, details: { code: "vercel_preview_requires_existing_deployment" },
+      message: expect.stringContaining("target=production"),
+    });
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(request.mock.calls.every(([, init]) => init.method === "GET")).toBe(true);
+  });
+
+  it.each(["ERROR", "CANCELED"])("accepts an existing %s deployment as the preview prerequisite", async (state) => {
+    const { client } = previewFixture({ deployments: [{ ...previousDeployment, state }] });
+    expect(await client.invoke("vercel_create_deployment", deploymentArgs)).toEqual(deployment);
+  });
+
+  it.each([
+    [null, 502],
+    [{ deployments: {} }, 502],
+    [{ deployments: [null] }, 502],
+    [{ deployments: [{ projectId: project.id, uid: "invalid" }] }, 502],
+    [{ deployments: [{ ...previousDeployment, projectId: "prj_other" }] }, 403],
+  ])("rejects an unverified preview prerequisite %j before mutation", async (existing, status) => {
+    const { request, client } = previewFixture(existing);
+    await expect(client.invoke("vercel_create_deployment", deploymentArgs)).rejects.toMatchObject({ status });
+    expect(request.mock.calls.every(([, init]) => init.method === "GET")).toBe(true);
+  });
+
+  it.each(["production", undefined, "staging", { unexpected: token }])("returns a bounded reconciliation receipt for preview response target %j", async (target) => {
+    const { request, client } = previewFixture({ deployments: [previousDeployment] }, {
+      ...deployment, target, url: token, env: [{ value: token }], unknown: token,
+    });
+    expect(await client.invoke("vercel_create_deployment", deploymentArgs)).toEqual({
+      id: deployment.id, projectId: project.id, requestedTarget: "preview",
+      target: target === "production" ? "production" : "unknown", reconciliationRequired: true,
+      code: "vercel_deployment_target_mismatch",
+      message: "Vercel created a deployment without confirming the requested preview environment. Inspect this deployment before any retry; it may use Production environment variables and domains.",
+    });
+    expect(request.mock.calls.filter(([, init]) => init.method === "POST")).toHaveLength(1);
+    expect(request.mock.calls.some(([, init]) => init.method === "DELETE")).toBe(false);
+  });
+
+  it("cancels a preview prerequisite without a late deployment write", async () => {
+    const controller = new AbortController();
+    let finish!: (response: Response) => void;
+    let markStarted!: () => void;
+    const started = new Promise<void>(resolve => { markStarted = resolve; });
+    const request = vi.fn<VercelRequest>(async (url) => {
+      if (new URL(url).pathname === `/v9/projects/${project.id}`) return json(project);
+      markStarted();
+      return new Promise(resolve => { finish = resolve; });
+    });
+    const outcome = vercelClient(headers, request, teamId, controller.signal).invoke("vercel_create_deployment", deploymentArgs)
+      .then(() => null, error => error);
+    await started;
+    expect(new URL(request.mock.calls[1]![0]).pathname).toBe("/v7/deployments");
+    controller.abort();
+    expect(await outcome).toMatchObject({ status: 504 });
+    finish(json({ deployments: [previousDeployment] }));
+    await Promise.resolve();
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(request.mock.calls.every(([, init]) => init.method === "GET")).toBe(true);
   });
 
   it("checks deployment project identity before deleting, cancelling, or redeploying", async () => {

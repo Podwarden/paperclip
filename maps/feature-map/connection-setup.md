@@ -239,3 +239,11 @@ variables and existing domain attachment. Personal/shared credential ownership,
 action permissions, reconnect and removal use the regular setup flow. See
 [Supabase](../../doc/connections/SUPABASE.md) and
 [Vercel](../../doc/connections/vercel.md) for method boundaries and qualification.
+
+For these native methods, continue past a successful connection test into an
+actual native agent task: readiness, assigned-tool delivery, and task-card reuse
+must all work. The 2026-10-23 walkthrough exposed and repaired omitted REST
+admission at those boundaries. Verify a served deployment and provider settings,
+not only the catalog action count. Vercel preview requires an existing deployment;
+its provider makes the first deployment production, so an empty-project preview
+must fail before submission and explain the explicit production prerequisite.

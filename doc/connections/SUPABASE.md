@@ -219,6 +219,24 @@ connections. A final MCP list confirmed the proof project was absent. Forced ref
 fresh provider credentials were not live-tested. No paid upgrade or existing
 production resource was created or modified.
 
+A subsequent browser-only walkthrough on 2026-10-23 used a real native Codex
+agent rather than the process gateway harness. It exposed a delivery gap:
+connection readiness, native assignments, and runtime preparation accepted only
+their existing transports and omitted reviewed REST connections. The saved
+credential passed a project-read test as the same agent, but the task could not
+discover its actions and rejected the offered identity as conflicting. The
+three filters now recognize the reviewed REST registry while retaining existing
+installation, identity, health, and action-policy checks. Four database-backed
+regressions failed before the fix; all 33 deployment lifecycle cases passed after.
+
+After a separate source repair and isolated-instance restart, the same Codex
+task deployed a JWT-protected function, set a synthetic environment marker,
+changed the Auth site URL and Data API row limit, and read all four back. The
+Dashboard independently showed JWT verification enabled and the saved Auth URL.
+Its built-in function tester returned HTTP 200 with the exact synthetic marker.
+The earlier failed browser runs remain separate evidence; this retry does not
+retroactively qualify their missing agent path.
+
 Sensitive tool arguments such as `secretValue` are encrypted in newly created
 approval payloads with the instance tool-action signing secret. Approval summaries
 and audit still use redacted values. Existing signed approval records remain
